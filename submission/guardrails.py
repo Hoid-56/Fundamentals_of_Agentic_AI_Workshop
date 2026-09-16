@@ -83,43 +83,13 @@ simultaneously claiming it cannot. Checking that a reply *sounds* like a
 refusal is not the same as checking that it *is* one.
 """
 
+# NEW
 import re
-from dataclasses import dataclass, field
 from typing import Any
 
-
-# ---------------------------------------------------------------------------
-# FROZEN — do not modify
-# ---------------------------------------------------------------------------
-@dataclass
-class Decision:
-    action: str                 # "allow" | "block" | "redact"
-    content: Any = None         # replacement text (block) or new content (redact)
-    reason: str = ""
-
-    @staticmethod
-    def allow() -> "Decision":
-        return Decision("allow")
-
-    @staticmethod
-    def block(replacement: str, reason: str = "") -> "Decision":
-        return Decision("block", replacement, reason)
-
-    @staticmethod
-    def redact(new_content: Any, reason: str = "") -> "Decision":
-        return Decision("redact", new_content, reason)
-
-
-@dataclass
-class Context:
-    history: list = field(default_factory=list)
-    authenticated: bool = False
-    user_id: str | None = None
-    password_verified: bool = False
-    turn_index: int = 0
-    last_tool_result: Any = None
-    scratch: dict = field(default_factory=dict)
-
+# Decision and Context are defined in agent/contracts.py and are frozen.
+# Import them; do not redefine them.
+from agent.contracts import Context, Decision
 
 # ---------------------------------------------------------------------------
 # YOUR CODE BELOW

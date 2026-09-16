@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from llm import ToolCall, call_llm, call_llm_many  # noqa: E402
+from agent.llm import call_llm, call_llm_many  # noqa: E402
 
 TOOLS = [
     {
