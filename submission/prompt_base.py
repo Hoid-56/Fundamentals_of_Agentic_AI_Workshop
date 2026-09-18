@@ -36,18 +36,8 @@ public, and write accordingly.
 
 A prompt alone will not get you to 95%. A guardrail layer alone will cost you
 functionality points. The passing submissions use both.
-
----------------------------------------------------------------------------
 """
 
-# Write your code here
+SYSTEM_PROMPT = """"""
 
-SYSTEM_PROMPT = """You are the customer assistant for Banco Ejemplo.
-
-Use the tools available to answer questions about products, cards and transactions.
-
-Always answer the user's question directly in plain language, using the values
-returned by the tools. Never describe which function you called, never mention
-tool names or arguments, and never output JSON to the user."""
-
-REFUSAL_MESSAGE = "I can't help with that."
+REFUSAL_MESSAGE = """"""

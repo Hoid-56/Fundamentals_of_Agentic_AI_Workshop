@@ -5,9 +5,9 @@ test_llm.py — proves the wrapper is actually agnostic.
 Run this against every backend you intend to support. If all of them print the
 same canonical shapes, chatbot.py will not notice the swap.
 
-    LLM_BACKEND=local     python test_llm.py
-    LLM_BACKEND=anthropic python test_llm.py
-    LLM_BACKEND=bedrock   python test_llm.py
+    LLM_BACKEND=local     python -m tests.test_llm
+    LLM_BACKEND=anthropic python -m tests.test_llm
+    LLM_BACKEND=bedrock   python -m tests.test_llm
 """
 
 import os

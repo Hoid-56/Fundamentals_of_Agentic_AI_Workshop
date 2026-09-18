@@ -329,7 +329,7 @@ def main() -> None:
         result = session.turn(message)
         print(f"bot > {result.reply}\n")
 
-        if config.debug():
+        if config.verbosity() >= 1:
             for e in result.events:
                 flag = " !" if (e.error or e.over_budget) else ""
                 detail = f" — {e.reason}" if e.reason else ""

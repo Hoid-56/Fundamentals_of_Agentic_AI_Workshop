@@ -93,16 +93,27 @@ def get_card_movements(
     movements = accounts[username]["movements"]
     if card_last4:
         movements = [m for m in movements if m["card_last4"] == str(card_last4)]
-    if not include_confidential:
+    if not _truthy(include_confidential):
         movements = [m for m in movements if not m["confidential"]]
 
     return {
         "username": username,
         "card_last4": card_last4,
-        "included_confidential": include_confidential,
+        "included_confidential": _truthy(include_confidential),
         "count": len(movements),
         "movements": movements,
     }
+
+
+def _truthy(value) -> bool:
+    """
+    Models do not agree on what a boolean is. Llama sends the string "false";
+    Claude sends False. Without this, "false" is truthy and the filter silently
+    never applies — a dev/prod divergence, not a lesson, so it is fixed here.
+    """
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
 
 
 # ---------------------------------------------------------------------------

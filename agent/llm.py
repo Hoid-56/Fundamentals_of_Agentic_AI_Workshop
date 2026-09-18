@@ -41,6 +41,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent import config
+
 # --------------------------------------------------------------------------
 # Canonical types — FROZEN. Every backend produces these.
 # --------------------------------------------------------------------------
@@ -77,9 +79,18 @@ def call_llm(
     tools: list[dict] | None = None,
     max_tokens: int = 512,
     temperature: float = 0.0,
+    reasoning: bool | None = None,
 ) -> LLMResponse:
-    """Single completion. temperature=0.0 by default so grading is reproducible."""
-    return _backend().generate(messages, system, tools, max_tokens, temperature)
+    """
+    Single completion. temperature=0.0 by default so grading is reproducible.
+
+    `reasoning` defaults to config.ENABLE_REASONING. It is a no-op on backends
+    that have no thinking mode (local Llama), and maps to extended thinking on
+    Anthropic and Bedrock.
+    """
+    if reasoning is None:
+        reasoning = config.ENABLE_REASONING
+    return _backend().generate(messages, system, tools, max_tokens, temperature, reasoning)
 
 
 def call_llm_many(
@@ -126,7 +137,9 @@ def reset_backend():
 
 
 class Backend:
-    def generate(self, messages, system, tools, max_tokens, temperature) -> LLMResponse:
+    def generate(
+        self, messages, system, tools, max_tokens, temperature, reasoning=False
+    ) -> LLMResponse:
         raise NotImplementedError
 
     def generate_many(self, requests, max_workers) -> list[LLMResponse]:
@@ -142,6 +155,7 @@ def _fill(r: dict) -> dict:
         "tools": r.get("tools"),
         "max_tokens": r.get("max_tokens", 512),
         "temperature": r.get("temperature", 0.0),
+        "reasoning": r.get("reasoning", config.ENABLE_REASONING),
     }
 
 
@@ -183,20 +197,19 @@ class LocalLlamaBackend(Backend):
         for m in messages:
             role = m["role"]
             if role == "tool":
-                # DEV COMPROMISE. The ipython role alone is not enough: Llama
-                # tends to *describe* the function rather than use the result.
-                # Explicit framing fixes it. Native backends (Anthropic/Bedrock)
-                # use real tool_result blocks and need none of this.
-                out.append(
-                    {
-                        "role": "ipython",
-                        "content": (
-                            f"{m['content']}\n\n"
-                            "Use this result to answer the user's question directly. "
-                            "Do not describe the function."
-                        ),
-                    }
-                )
+                # The <|python_tag|> marker on the assistant turn below is what
+                # actually makes Llama treat call and result as a pair. An extra
+                # instruction used to be appended here as well; it leaked into
+                # the model's sense of its own instructions and confounded
+                # prompt-extraction tests, so it is off unless config says
+                # otherwise.
+                content = m["content"]
+                if config.LOCAL_TOOL_RESULT_HINT:
+                    content += (
+                        "\n\nUse this result to answer the user's question "
+                        "directly. Do not describe the function."
+                    )
+                out.append({"role": "ipython", "content": content})
             elif role == "assistant" and m.get("tool_calls"):
                 # Llama marks its own tool calls with <|python_tag|>. Without it
                 # the call and its result do not read as a pair.
@@ -309,7 +322,9 @@ class LocalLlamaBackend(Backend):
             native, tools=native_tools, tokenize=False, add_generation_prompt=True
         )
 
-    def generate(self, messages, system, tools, max_tokens, temperature):
+    def generate(self, messages, system, tools, max_tokens, temperature, reasoning=False):
+        # Llama 3.1 8B has no thinking mode; `reasoning` is accepted and ignored
+        # so the call signature stays identical across backends.
         return self._run([self._render(messages, system, tools)], max_tokens, temperature)[0]
 
     def generate_many(self, requests, max_workers):
@@ -337,12 +352,12 @@ class LocalLlamaBackend(Backend):
         with self._lock, self.torch.no_grad():
             out = self.model.generate(**enc, **kwargs)
 
-        debug = os.getenv("LLM_DEBUG") == "1"
+        show_raw = config.verbosity() >= 2
         responses = []
         for row in out:
             text = self.tok.decode(row[n_in:], skip_special_tokens=True).strip()
-            if debug:
-                print(f"\n[LLM_DEBUG] raw output >>>\n{text}\n<<<\n")
+            if show_raw:
+                print(f"\n[raw] >>>\n{text}\n<<<\n")
             r = self._parse(text)
             r.usage = {"input_tokens": n_in, "output_tokens": len(row) - n_in}
             responses.append(r)
@@ -403,7 +418,7 @@ class AnthropicBackend(Backend):
             ]
         return out, native_tools
 
-    def generate(self, messages, system, tools, max_tokens, temperature):
+    def generate(self, messages, system, tools, max_tokens, temperature, reasoning=False):
         native, native_tools = self._to_native(messages, tools)
         kwargs = dict(
             model=self.model,
@@ -411,6 +426,13 @@ class AnthropicBackend(Backend):
             max_tokens=max_tokens,
             temperature=temperature,
         )
+        if reasoning:
+            # Extended thinking requires temperature=1 and max_tokens above the
+            # budget. Both are forced here rather than left to the caller.
+            budget = config.REASONING_BUDGET_TOKENS
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            kwargs["temperature"] = 1.0
+            kwargs["max_tokens"] = max(max_tokens, budget + 512)
         if system:
             # Cacheable: identical across every call in a grader run.
             kwargs["system"] = [
@@ -425,6 +447,8 @@ class AnthropicBackend(Backend):
         for block in resp.content:
             if block.type == "text":
                 text += block.text
+            elif block.type in {"thinking", "redacted_thinking"}:
+                continue          # never surfaced to the user or the grader
             elif block.type == "tool_use":
                 calls.append(ToolCall(id=block.id, name=block.name, arguments=block.input))
 
@@ -472,7 +496,7 @@ class OpenAIBackend(Backend):
         )
         self.model = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
-    def generate(self, messages, system, tools, max_tokens, temperature):
+    def generate(self, messages, system, tools, max_tokens, temperature, reasoning=False):
         native = []
         if system:
             native.append({"role": "system", "content": system})
