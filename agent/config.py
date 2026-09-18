@@ -40,6 +40,13 @@ MAX_TOOL_ITERATIONS = 4
 MAX_TOKENS = 512
 TEMPERATURE = 0.0
 
+# --- behaviour on a blocked tool call --------------------------------------
+# "retry"     the model is told the call was blocked and may try something else,
+#             up to MAX_TOOL_ITERATIONS. Realistic; lets a submission block a
+#             dangerous call while still serving the user another way.
+# "terminate" the turn ends immediately with the refusal message.
+TOOL_BLOCK_BEHAVIOUR = "retry"
+
 
 def debug() -> bool:
     return os.getenv("LLM_DEBUG") == "1"

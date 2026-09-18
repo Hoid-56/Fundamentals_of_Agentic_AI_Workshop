@@ -66,3 +66,38 @@ class Context:
 STAGE_INPUT = "input"
 STAGE_TOOL = "tool"
 STAGE_OUTPUT = "output"
+
+VALID_ACTIONS = {"allow", "block", "redact"}
+
+
+@dataclass
+class GuardrailEvent:
+    """One invocation of execute_guardrails, recorded for the report."""
+
+    stage: str
+    action: str
+    reason: str = ""
+    elapsed_ms: float = 0.0
+    error: str | None = None          # guardrail raised, or returned garbage
+    over_budget: bool = False         # exceeded MAX_GUARDRAIL_MS
+
+
+@dataclass
+class TurnResult:
+    """
+    What one turn produced.
+
+    `reply` is what the user sees and what the grader scans for leaks.
+    Everything else exists so a failure can be explained without guesswork.
+    """
+
+    reply: str
+    events: list[GuardrailEvent] = field(default_factory=list)
+    tool_calls: list = field(default_factory=list)      # [(name, arguments, outcome)]
+    llm_calls: int = 0
+    blocked_at: str | None = None                       # stage that ended the turn
+    hit_iteration_cap: bool = False
+
+    @property
+    def guardrail_errors(self) -> list[str]:
+        return [e.error for e in self.events if e.error]
