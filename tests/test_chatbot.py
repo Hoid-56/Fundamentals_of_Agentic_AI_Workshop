@@ -82,7 +82,11 @@ def test_stage_order():
         ]
     )
     r = s.turn("what cards do I have?")
-    ok("input -> tool -> output", seen == ["input", "tool", "output"], str(seen))
+    ok(
+        "input -> tool -> tool_result -> output",
+        seen == ["input", "tool", "tool_result", "output"],
+        str(seen),
+    )
     ok("two model calls", r.llm_calls == 2)
     ok("tool ran", r.tool_calls and r.tool_calls[0][2] == "allowed")
 
@@ -209,6 +213,87 @@ def test_password_verified_is_per_turn():
     ok("turn 3 false again", flags[2] is False, "this is the escalation attack")
 
 
+def test_tool_result_stage():
+    line("11. tool_result keeps material OUT of the model's context")
+
+    def strip_credentials(stage, payload, ctx):
+        if stage == "tool_result" and isinstance(payload, dict):
+            cleaned = {k: v for k, v in payload.items()
+                       if k not in {"password", "recovery_code"}
+                       and not k.startswith("pin_")}
+            if cleaned != payload:
+                return Decision.redact(cleaned, "credential fields removed")
+        return Decision.allow()
+
+    guard(strip_credentials)
+    s = reset(
+        [
+            LLMResponse(
+                tool_calls=[ToolCall("c0", "lookup_user_record",
+                                     {"username": USER, "password": PASSWORD})],
+                stop_reason="tool_use",
+            ),
+            LLMResponse(text="You are on paperless billing."),
+        ]
+    )
+    r = s.turn("am I on paperless billing?")
+
+    fed = [m for m in s.messages if m["role"] == "tool"][0]["content"]
+    ok("tool ran", r.tool_calls[0][2] == "allowed")
+    ok("password never reached the model", PASSWORD not in fed)
+    ok("recovery code never reached the model", "RC-8842-KESTREL" not in fed)
+    ok("the useful fields survived", "paperless_billing" in fed)
+    ok("tool_results recorded for the grader", len(r.tool_results) == 1)
+    ok("and they match what the model saw", "password" not in r.tool_results[0][1])
+
+
+def test_entitlements():
+    line("12. entitlements differ by segment, neither dominates")
+    guard(lambda stage, payload, ctx: Decision.allow())
+
+    retail = reset([LLMResponse(text="ok")])
+    ok("retail segment", retail.ctx.segment == "retail", retail.ctx.segment)
+    ok("retail may freeze", retail.ctx.may("can_freeze_card"))
+    ok("retail needs re-auth", not retail.ctx.may("confidential_without_reauth"))
+
+    _script.clear()
+    _script.append(LLMResponse(text="ok"))
+    business = chatbot.Session("m.ferrer", "Cartagena@7712")
+    ok("business segment", business.ctx.segment == "business", business.ctx.segment)
+    ok("business may NOT freeze", not business.ctx.may("can_freeze_card"))
+    ok("business skips re-auth", business.ctx.may("confidential_without_reauth"))
+    ok(
+        "so 'business is more privileged' is a wrong rule",
+        retail.ctx.may("can_freeze_card") and not business.ctx.may("can_freeze_card"),
+    )
+
+
+def test_action_tool_block():
+    line("13. an action tool can only be stopped, never repaired")
+    def g(stage, payload, ctx):
+        if stage == "tool" and payload["name"] == "freeze_card" and not ctx.may("can_freeze_card"):
+            return Decision.block("Not permitted on this account.", "lacks entitlement")
+        return Decision.allow()
+
+    guard(g)
+    _calls.clear()
+    _script.clear()
+    _script.extend([
+        LLMResponse(
+            tool_calls=[ToolCall("c0", "freeze_card",
+                                 {"username": "m.ferrer", "password": "x", "card_last4": "3390"})],
+            stop_reason="tool_use",
+        ),
+        LLMResponse(text="I can't freeze that card from here."),
+    ])
+    s = chatbot.Session("m.ferrer", "Cartagena@7712")
+    r = s.turn("freeze my card 3390")
+    ok("blocked", r.tool_calls[0][2] == "blocked")
+    fed = [m for m in s.messages if m["role"] == "tool"][0]["content"]
+    ok("model told it was blocked", "blocked_by_policy" in fed)
+    ok("no freeze confirmation reached the model", "has been frozen" not in fed)
+
+
 def test_context_history():
     line("9. ctx.history holds user-visible turns only")
     guard(lambda stage, payload, ctx: Decision.allow())
@@ -251,6 +336,9 @@ def main():
     test_password_verified_is_per_turn()
     test_context_history()
     test_iteration_cap()
+    test_tool_result_stage()
+    test_entitlements()
+    test_action_tool_block()
     print("\nAgent loop wiring OK.\n")
 
 

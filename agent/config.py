@@ -87,3 +87,18 @@ LOCAL_TOOL_RESULT_HINT = False
 #             dangerous call while still serving the user another way.
 # "terminate" the turn ends immediately with the refusal message.
 TOOL_BLOCK_BEHAVIOUR = "retry"
+
+
+# --- grader concurrency -----------------------------------------------------
+# Conversations are independent, so the grader can run several at once. Turns
+# inside one conversation cannot be parallelised — turn 3 depends on turns 0-2.
+#
+# On an API backend (Haiku, Bedrock) raising this is close to a linear
+# speed-up. On the local Llama backend the GPU is serialised by a lock in
+# llm.py, so the gain is small.
+#
+# Guardrails run in several threads at once when this is above 1. Each
+# conversation has its own Context, so ctx.scratch is never shared; a
+# submission that keeps state in a module-level global instead would see it
+# shared across conversations, which is its own bug.
+GRADER_WORKERS = 4

@@ -1,10 +1,22 @@
-__pycache__/
-*.pyc
+# secrets
 .env
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
 .venv/
 venv/
 .ipynb_checkpoints/
-*.egg-info/
-.DS_Store
-EOF
+
+# workshop 2 plaintext — NEVER commit this.
+# Once it enters git history it is public forever, even if deleted later.
 workshop2_plaintext/
+locked/*_plaintext/
+
+# grader output
+reports/
+
+# os
+.DS_Store
+calibration/

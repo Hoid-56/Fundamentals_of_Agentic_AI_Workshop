@@ -8,22 +8,30 @@ exercise is hard.
 Shape of a turn:
 
     user message
-        -> execute_guardrails("input",  message, ctx)
+        -> execute_guardrails("input",       message, ctx)
         -> model
-        -> execute_guardrails("tool",   {name, arguments}, ctx)   per call
+        -> execute_guardrails("tool",        {name, arguments}, ctx)   per call
         -> tool executes
-        -> model                                                  (loop)
-        -> execute_guardrails("output", draft, ctx)
+        -> execute_guardrails("tool_result", result, ctx)              per call
+        -> model                                                       (loop)
+        -> execute_guardrails("output",      draft, ctx)
         -> user
 
-Two things decided in code, never by the model:
+The tool_result stage is the one most people skip. It is the last point at
+which something can be kept OUT of the model's context rather than cleaned up
+afterwards, and that distinction is not cosmetic: anything the model has seen
+stays in the transcript for every remaining turn of the conversation, where a
+later question can pull it back out.
+
+Three things decided in code, never by the model:
 
   * whether the login was valid
   * whether the password was re-entered THIS turn (ctx.password_verified)
+  * what the account is entitled to do (ctx.segment, ctx.entitlements)
 
-Both are plain string comparisons made before the model sees anything. The
-model has no authority over authentication. It does, however, have the
-credentials — see build_system_prompt below.
+All three are settled before the model sees anything. The model has no
+authority over them. It does, however, have the credentials — see
+build_system_prompt below.
 """
 
 from __future__ import annotations
@@ -33,11 +41,12 @@ import json
 import time
 
 from agent import config
-from agent.auth import check_credentials, password_for
+from agent.auth import check_credentials, password_for, profile_for
 from agent.contracts import (
     STAGE_INPUT,
     STAGE_OUTPUT,
     STAGE_TOOL,
+    STAGE_TOOL_RESULT,
     VALID_ACTIONS,
     Context,
     Decision,
@@ -127,8 +136,14 @@ class Session:
         # Full transcript for the model: includes tool calls and tool results.
         self.messages: list[dict] = []
 
+        profile = profile_for(username)
         # What the guardrail sees: user-visible turns only.
-        self.ctx = Context(authenticated=True, user_id=username)
+        self.ctx = Context(
+            authenticated=True,
+            user_id=username,
+            segment=profile["segment"],
+            entitlements=profile["entitlements"],
+        )
 
         self._turn_index = 0
 
@@ -167,7 +182,7 @@ class Session:
 
         self.messages.append({"role": "user", "content": user_message})
 
-        # --- stage 2: model + tool loop -------------------------------------
+        # --- stage 2 and 3: model + tool loop -------------------------------
         response = None
         for iteration in range(config.MAX_TOOL_ITERATIONS + 1):
             response = call_llm(
@@ -201,7 +216,7 @@ class Session:
 
         draft = (response.text if response else "") or ""
 
-        # --- stage 3: output -------------------------------------------------
+        # --- stage 4: output -------------------------------------------------
         decision, event = _run_guardrail(STAGE_OUTPUT, draft, ctx)
         result.events.append(event)
 
@@ -221,15 +236,17 @@ class Session:
     # -- tool handling ------------------------------------------------------
     def _handle_tool_calls(self, calls, ctx: Context, result: TurnResult) -> bool:
         """
-        Guard and run each requested tool call.
+        Guard the call, run it, then guard what came back.
 
         Returns True if the turn should end now (only possible under
         TOOL_BLOCK_BEHAVIOUR == "terminate").
 
-        A "redact" decision here replaces the call payload, so a guardrail can
-        force include_confidential=False, or rewrite a username, instead of
-        refusing outright. That is usually the better move: it preserves
-        functionality while removing the danger.
+        A "redact" at the tool stage replaces the call payload, so a guardrail
+        can force include_confidential=False, or rewrite a username, instead of
+        refusing outright. A "redact" at the tool_result stage replaces what
+        comes back, so a guardrail can strip credential fields out of a record
+        the agent legitimately needed to fetch. Both preserve functionality
+        that an outright block would destroy.
         """
         for call in calls:
             payload = {"name": call.name, "arguments": dict(call.arguments)}
@@ -250,7 +267,7 @@ class Session:
                     or "This call is not permitted. Do not retry it verbatim.",
                 }
                 result.tool_calls.append((call.name, payload["arguments"], "blocked"))
-                self._append_tool_result(call, outcome, ctx)
+                self._append_tool_result(call, outcome, ctx, result)
                 continue
 
             if decision.action == "redact":
@@ -263,12 +280,28 @@ class Session:
 
             outcome = execute_tool(call.name, call.arguments)
             result.tool_calls.append((call.name, dict(call.arguments), status))
-            self._append_tool_result(call, outcome, ctx)
+
+            # --- the tool has run; decide what the model is allowed to see ---
+            decision, event = _run_guardrail(STAGE_TOOL_RESULT, outcome, ctx)
+            result.events.append(event)
+
+            if decision.action == "block":
+                outcome = {
+                    "error": "result_withheld_by_policy",
+                    "detail": decision.content
+                    or "The result of this call cannot be shown.",
+                }
+            elif decision.action == "redact":
+                outcome = decision.content
+
+            self._append_tool_result(call, outcome, ctx, result)
 
         return False
 
-    def _append_tool_result(self, call, outcome, ctx: Context) -> None:
+    def _append_tool_result(self, call, outcome, ctx: Context, result: TurnResult) -> None:
+        """Feed a result to the model and record exactly what it saw."""
         ctx.last_tool_result = outcome
+        result.tool_results.append((call.name, outcome))
         self.messages.append(
             {
                 "role": "tool",
@@ -299,7 +332,8 @@ def login(max_attempts: int = 3) -> tuple[str, str] | None:
             return None
 
         if check_credentials(username, password):
-            print(f"\n  Signed in as {username}. Type 'exit' to quit.\n")
+            profile = profile_for(username)
+            print(f"\n  Signed in as {username} ({profile['segment']}). Type 'exit' to quit.\n")
             return username, password
 
         print(f"  Incorrect. {remaining - 1} attempt(s) left.\n")
@@ -333,9 +367,12 @@ def main() -> None:
             for e in result.events:
                 flag = " !" if (e.error or e.over_budget) else ""
                 detail = f" — {e.reason}" if e.reason else ""
-                print(f"      [{e.stage:6s}] {e.action:6s} {e.elapsed_ms:5.1f}ms{detail}{flag}")
+                print(
+                    f"      [{e.stage:11s}] {e.action:6s} "
+                    f"{e.elapsed_ms:5.1f}ms{detail}{flag}"
+                )
             for name, args, status in result.tool_calls:
-                print(f"      [tool  ] {status:8s} {name}({args})")
+                print(f"      [tool       ] {status:8s} {name}({args})")
             print()
 
 
