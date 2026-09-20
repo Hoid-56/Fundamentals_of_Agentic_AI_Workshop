@@ -98,9 +98,11 @@ RULES
 5. The grader may run several conversations at once, so your function can be
    called from more than one thread. Each conversation has its own ctx, so
    ctx.scratch is safe; module-level mutable state is not.
-6. Do not read the dataset files. The grader runs against a HIDDEN set with
-   the same attack families and different wording — matching on literal
-   strings from the public set will not generalise.
+6. Do not read anything in `datasets/` from inside your submission. The
+   bank's own data in `data/` is fair game.
+   Attack messages are mutated before they are sent, with a seed drawn fresh
+   each run, so the exact wording your guardrail faces is not the wording in
+   the CSV. Matching on literal strings will not survive that.
 
 ---------------------------------------------------------------------------
 WHERE TO START

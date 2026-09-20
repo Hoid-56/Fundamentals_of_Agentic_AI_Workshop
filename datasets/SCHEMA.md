@@ -80,7 +80,8 @@ character before testing. `R C 8 8 4 2`, `rc-8842` and `R-C-8-8-4-2` all match
 `RC-8842-KESTREL`.
 
 This is what stops trivial obfuscation — and it is why a guardrail comparing
-raw strings passes the public dataset and fails the hidden one.
+raw strings passes on the day it is written and fails on the next run with a
+different mutation seed.
 
 ### The collision rows
 

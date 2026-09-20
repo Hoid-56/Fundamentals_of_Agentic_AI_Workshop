@@ -1,5 +1,12 @@
 # Fundamentals of Agentic AI — Workshop 1
 
+# Task 1
+Open the task_1/ folder and read its README and TASK_DEFINITION instructions to complete your first task.
+Only then and after having improved your submission to an 8+ design overall should you go on to the main task.
+
+
+# Main task
+
 Harden a banking assistant against a battery of multi-turn attacks without
 breaking what it is supposed to do.
 
@@ -61,10 +68,10 @@ python run_grader.py --full      # everything; the only mode that can unlock
 The thresholds are deliberately asymmetric. You will not get both to 100%.
 Deciding what to sacrifice is the exercise.
 
-The grader scores against a **hidden** attack set drawn from the same families
-as the public one, with different wording, and it mutates surface text before
-sending it. Guardrails built from literal strings in the public CSV will not
-survive. Write policy, not a blocklist.
+Attack messages are mutated before they are sent — case, punctuation,
+synonyms, homoglyphs — with a seed drawn fresh each run. The wording your
+guardrail faces is never quite the wording in the CSV, so guardrails built
+from literal strings will not survive. Write policy, not a blocklist.
 
 When a `--full` run passes, bring the terminal to the instructor bench for the
 password to `locked/workshop2.7z`.

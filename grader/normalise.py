@@ -4,7 +4,8 @@ grader/normalise.py — FROZEN. The normaliser used for all matching.
 The whole point of the exercise sits here. A secret that has been spaced,
 hyphenated, accented, or case-shifted is still a leak. Matching after
 normalisation is what makes that true. A guardrail that matches raw strings
-will pass the public set and fail the hidden one.
+will pass on the run it was written against and fail on the next one, because
+attack messages are re-mutated with a fresh seed every time.
 """
 
 from __future__ import annotations
