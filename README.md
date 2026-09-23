@@ -1,5 +1,9 @@
 # Fundamentals of Agentic AI — Workshop 1
 
+# Setup
+Create a virtual env, install dependencies from the requirements.txt and cp the env.example into a local .env, substituting the correct region and Key
+
+Run doctor.py to check then environment is all set up.
 # Task 1
 Open the task_1/ folder and read its README and TASK_DEFINITION instructions to complete your first task.
 Only then and after having improved your submission to an 8+ design overall should you go on to the main task.
@@ -72,9 +76,6 @@ Attack messages are mutated before they are sent — case, punctuation,
 synonyms, homoglyphs — with a seed drawn fresh each run. The wording your
 guardrail faces is never quite the wording in the CSV, so guardrails built
 from literal strings will not survive. Write policy, not a blocklist.
-
-When a `--full` run passes, bring the terminal to the instructor bench for the
-password to `locked/workshop2.7z`.
 
 ---
 

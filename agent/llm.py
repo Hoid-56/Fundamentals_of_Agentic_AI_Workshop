@@ -48,6 +48,14 @@ from agent import config
 # --------------------------------------------------------------------------
 
 
+class SetupError(RuntimeError):
+    """
+    A configuration problem the person running this can fix, as opposed to a
+    bug. Entry points print these without a traceback, because a traceback
+    teaches a new joiner nothing about a missing environment variable.
+    """
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -120,13 +128,20 @@ def _backend():
     if _BACKEND is None:
         with _LOCK:
             if _BACKEND is None:
-                name = os.getenv("LLM_BACKEND", "local").lower()
-                _BACKEND = {
+                name = os.getenv("LLM_BACKEND", "local").lower().strip()
+                choices = {
                     "local": LocalLlamaBackend,
                     "anthropic": AnthropicBackend,
                     "bedrock": BedrockBackend,
                     "openai": OpenAIBackend,
-                }[name]()
+                }
+                if name not in choices:
+                    raise SetupError(
+                        f"LLM_BACKEND={name!r} is not a backend.\n"
+                        f"    Valid values: {', '.join(sorted(choices))}\n"
+                        "    The workshop default is bedrock."
+                    )
+                _BACKEND = choices[name]()
     return _BACKEND
 
 
@@ -470,15 +485,180 @@ class AnthropicBackend(Backend):
 
 
 class BedrockBackend(AnthropicBackend):
-    def __init__(self):
-        from anthropic import AnthropicBedrock
+    """
+    Bedrock accepts two different kinds of credential, and the failure modes
+    when you get it wrong are unhelpful enough to be worth catching here.
 
-        self.client = AnthropicBedrock(aws_region=os.getenv("AWS_REGION", "us-east-1"))
+      A. Bedrock API key   AWS_BEARER_TOKEN_BEDROCK
+                           One value. Sent as `Authorization: Bearer ...`.
+                           Needs anthropic>=0.88 and does NOT need boto3.
+
+      B. IAM credentials   AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+                           (+ AWS_SESSION_TOKEN if temporary), or AWS_PROFILE.
+                           Signed with SigV4. Needs boto3.
+
+    The two are mutually exclusive: the SDK raises "Cannot specify both
+    `api_key` and AWS credentials" if you hand it both. We pick A when a
+    bearer token is present and say so, rather than letting the SDK guess.
+    """
+
+    MIN_SDK = (0, 88, 0)
+
+    def __init__(self):
+        try:
+            import anthropic
+            from anthropic import AnthropicBedrock
+        except ImportError as exc:
+            raise SetupError(
+                "The `anthropic` package is not installed.\n"
+                "    Fix:  pip install -r requirements.txt"
+            ) from exc
+
+        token = (os.getenv("AWS_BEARER_TOKEN_BEDROCK") or "").strip()
+        access_key = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
+        profile = (os.getenv("AWS_PROFILE") or "").strip()
+        region = (os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "").strip()
+
+        if not region:
+            raise SetupError(
+                "No AWS region set, and the SDK will not guess one.\n"
+                "    Fix:  add AWS_REGION=us-east-1 to your .env "
+                "(use the region your Bedrock access is in)."
+            )
+
+        if not token and not access_key and not profile:
+            raise SetupError(
+                "No Bedrock credentials found.\n"
+                "    Set ONE of these in your .env:\n"
+                "      AWS_BEARER_TOKEN_BEDROCK=...   (a Bedrock API key)\n"
+                "      AWS_ACCESS_KEY_ID=... plus AWS_SECRET_ACCESS_KEY=...\n"
+                "      AWS_PROFILE=...                (a profile in ~/.aws/credentials)\n"
+                "    If you did set one, your .env is probably not being read: it must\n"
+                "    sit in the repository root, next to run_grader.py."
+            )
+
+        if token:
+            installed = _sdk_version(anthropic)
+            if installed < self.MIN_SDK:
+                raise SetupError(
+                    f"anthropic {_v(installed)} is installed, but Bedrock API key "
+                    f"(bearer token) support arrived in {_v(self.MIN_SDK)}.\n"
+                    "    On this version AWS_BEARER_TOKEN_BEDROCK is ignored and you get\n"
+                    "    a credentials error that names nothing useful.\n"
+                    "    Fix:  pip install -U 'anthropic>=0.88'"
+                )
+            # Pass it explicitly. Relying on the env var means a stray
+            # AWS_ACCESS_KEY_ID in the shell can silently take precedence.
+            self.client = AnthropicBedrock(api_key=token, aws_region=region)
+            self.auth_mode = "bedrock api key"
+        else:
+            if access_key and not os.getenv("AWS_SECRET_ACCESS_KEY"):
+                raise SetupError(
+                    "AWS_ACCESS_KEY_ID is set but AWS_SECRET_ACCESS_KEY is not.\n"
+                    "    Fix:  set both, or switch to AWS_BEARER_TOKEN_BEDROCK."
+                )
+            try:
+                import boto3  # noqa: F401
+            except ImportError as exc:
+                raise SetupError(
+                    "IAM credentials need boto3 to sign requests, and it is not "
+                    "installed.\n"
+                    "    Fix:  pip install boto3\n"
+                    "    Or:   use a Bedrock API key instead, which needs no boto3."
+                ) from exc
+            self.client = AnthropicBedrock(aws_region=region)
+            self.auth_mode = f"iam sigv4 ({'profile ' + profile if profile else 'env keys'})"
+
+        self.region = region
         # NOTE: bare model ids fail on Bedrock with "on-demand throughput isn't
         # supported". Must be an inference profile id or full ARN.
         self.model = os.getenv(
             "LLM_MODEL", "global.anthropic.claude-haiku-4-5-20251001-v1:0"
         )
+
+    def generate(self, *args, **kwargs):
+        try:
+            return super().generate(*args, **kwargs)
+        except SetupError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — translate, then re-raise
+            raise _translate_bedrock_error(exc, self.model, self.region) from exc
+
+
+def _sdk_version(module) -> tuple:
+    raw = getattr(module, "__version__", "0.0.0")
+    parts = []
+    for chunk in str(raw).split(".")[:3]:
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+
+def _v(version: tuple) -> str:
+    return ".".join(str(p) for p in version)
+
+
+def _translate_bedrock_error(exc: Exception, model: str, region: str) -> Exception:
+    """
+    Turn the four failures every new joiner hits into instructions. The
+    original exception is preserved as __cause__ for anyone who wants it.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    low = text.lower()
+
+    if "could not resolve credentials" in low or "nocredentials" in low:
+        return SetupError(
+            "Bedrock rejected the request because it found no usable credentials.\n"
+            "    Most likely: your .env is not being read, or the key is empty.\n"
+            "    Check:  python -m scripts.doctor\n"
+            f"    Original: {text}"
+        )
+    if "expiredtoken" in low or "the security token included in the request is expired" in low:
+        return SetupError(
+            "Your credentials have expired.\n"
+            "    Short-term Bedrock API keys last at most 12 hours, and SSO/temporary\n"
+            "    IAM credentials are usually shorter.\n"
+            "    Fix:  generate a new key and update .env.\n"
+            f"    Original: {text}"
+        )
+    if "unrecognizedclient" in low or ("invalid" in low and "token" in low):
+        return SetupError(
+            "Bedrock rejected the credential itself.\n"
+            "    Usually a truncated paste — a Bedrock API key is long and easy to\n"
+            "    clip. Re-copy it, and check there are no quotes or spaces in .env.\n"
+            f"    Original: {text}"
+        )
+    if "on-demand throughput" in low or "isn't supported" in low or "isnt supported" in low:
+        return SetupError(
+            f"Bedrock will not serve the bare model id {model!r}.\n"
+            "    It needs an inference profile id or a full ARN.\n"
+            "    Fix:  LLM_MODEL=global.anthropic.claude-haiku-4-5-20251001-v1:0\n"
+            f"    Original: {text}"
+        )
+    if "accessdenied" in low or "not authorized" in low:
+        return SetupError(
+            f"Your credentials work, but this account may not use {model!r} in "
+            f"{region}.\n"
+            "    Usually model access has not been enabled, or the IAM policy is\n"
+            "    missing bedrock:InvokeModel.\n"
+            "    Check with whoever issued the key.\n"
+            f"    Original: {text}"
+        )
+    if "throttl" in low or "too many requests" in low:
+        return SetupError(
+            "Bedrock is throttling this account.\n"
+            "    Lower the concurrency:  python run_grader.py --full --workers 2\n"
+            f"    Original: {text}"
+        )
+    if "could not connect" in low or "connection" in low or "ssl" in low:
+        return SetupError(
+            "Could not reach Bedrock over the network.\n"
+            "    On a corporate network this is usually the proxy or TLS inspection.\n"
+            f"    Original: {text}"
+        )
+    return exc
 
 
 # --------------------------------------------------------------------------

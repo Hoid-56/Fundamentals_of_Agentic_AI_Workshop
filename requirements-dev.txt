@@ -1,0 +1,14 @@
+# Instructor / development only. Participants do not need this file.
+#
+#     pip install -r requirements.txt -r requirements-dev.txt
+#
+# Adds the local Llama 3.1 8B backend (LLM_BACKEND=local), used to build and
+# calibrate the workshop without spending anything on hosted inference.
+# Needs a CUDA GPU with ~16GB; it is a slow CPU fallback otherwise.
+
+torch>=2.4
+transformers>=4.44
+accelerate>=0.33
+
+# Alternative hosted backends kept as last-minute insurance.
+# openai>=1.50
