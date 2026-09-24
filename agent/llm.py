@@ -384,6 +384,21 @@ class LocalLlamaBackend(Backend):
 # --------------------------------------------------------------------------
 
 
+# Models on which the API removed the sampling parameters. Sending temperature
+# to one of these is a 400; sending it to anything else (Haiku 4.5 and older) is
+# still accepted. Matched on the model id, which on Bedrock is an inference
+# profile like `global.anthropic.claude-haiku-4-5-...`.
+_NO_SAMPLING = (
+    "opus-4-6", "opus-4-7", "opus-4-8", "opus-5",
+    "sonnet-4-6", "sonnet-5",
+    "fable", "mythos",
+)
+
+
+def _accepts_sampling(model: str) -> bool:
+    return not any(marker in model for marker in _NO_SAMPLING)
+
+
 class AnthropicBackend(Backend):
     def __init__(self):
         from anthropic import Anthropic
@@ -439,15 +454,19 @@ class AnthropicBackend(Backend):
             model=self.model,
             messages=native,
             max_tokens=max_tokens,
-            temperature=temperature,
         )
         if reasoning:
             # Extended thinking requires temperature=1 and max_tokens above the
             # budget. Both are forced here rather than left to the caller.
             budget = config.REASONING_BUDGET_TOKENS
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            kwargs["temperature"] = 1.0
+            temperature = 1.0
             kwargs["max_tokens"] = max(max_tokens, budget + 512)
+        if _accepts_sampling(self.model):
+            # `temperature` stopped being a named argument of messages.create in
+            # anthropic 1.0; passing it raises TypeError. The wire field still
+            # exists for the models that support it, so send it through the body.
+            kwargs["extra_body"] = {"temperature": temperature}
         if system:
             # Cacheable: identical across every call in a grader run.
             kwargs["system"] = [
